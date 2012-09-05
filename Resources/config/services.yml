@@ -19,6 +19,8 @@ services:
         class: Snowcap\CoreBundle\Form\Type\ImageType
         tags:
             - { name: form.type, alias: snowcap_core_image }
+        calls:
+            - [ setRootDir, [ %kernel.root_dir% ] ]
     snowcap_core.video_type:
         class: Snowcap\CoreBundle\Form\Type\VideoType
         tags:

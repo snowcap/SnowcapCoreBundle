@@ -3,10 +3,12 @@
 namespace Snowcap\CoreBundle\Listener;
 
 use Doctrine\Common\EventSubscriber;
+use Doctrine\Common\EventArgs;
 use Doctrine\ORM\Event\LifecycleEventArgs;
 use Doctrine\ORM\Event\LoadClassMetadataEventArgs;
 
 use Snowcap\CoreBundle\Doctrine\ORM\Event\PreFlushEventArgs;
+use Snowcap\CoreBundle\File\CondemnedFile;
 
 class FileSubscriber implements EventSubscriber
 {
@@ -16,6 +18,12 @@ class FileSubscriber implements EventSubscriber
      * @var string
      */
     private $rootDir;
+
+    /**
+     * @var array
+     */
+    private $unlinkQueue = array();
+
     /**
      * @param string $rootDir
      */
@@ -29,9 +37,12 @@ class FileSubscriber implements EventSubscriber
      */
     public function getSubscribedEvents()
     {
-        return array('prePersist', 'postPersist', 'postUpdate', 'postRemove','loadClassMetadata','preFlush');
+        return array('prePersist', 'postPersist', 'postUpdate', 'preRemove', 'postRemove','loadClassMetadata','preFlush');
     }
 
+    /**
+     * @param \Doctrine\ORM\Event\LoadClassMetadataEventArgs $eventArgs
+     */
     public function loadClassMetadata(LoadClassMetadataEventArgs $eventArgs)
     {
         $reader = new \Doctrine\Common\Annotations\AnnotationReader();
@@ -55,6 +66,9 @@ class FileSubscriber implements EventSubscriber
         }
     }
 
+    /**
+     * @param \Snowcap\CoreBundle\Doctrine\ORM\Event\PreFlushEventArgs $ea
+     */
     public function preFlush(PreFlushEventArgs $ea)
     {
         /** @var $unitOfWork \Doctrine\ORM\UnitOfWork */
@@ -64,12 +78,24 @@ class FileSubscriber implements EventSubscriber
         foreach($entityMaps as $entities) {
             foreach($entities as $entity) {
                 foreach($this->getFiles($entity,$ea->getEntityManager()) as $file) {
-                    $this->preUpload($ea, $entity,$file);
+                    $propertyName = $file['property']->name;
+                    $property = $entity->$propertyName;
+                    if($property instanceof CondemnedFile) {
+                        $this->preRemoveUpload($entity, $file);
+                    }
+                    else {
+                        $this->preUpload($ea, $entity,$file);
+                    }
                 }
             }
         }
     }
 
+    /**
+     * @param $entity
+     * @param \Doctrine\ORM\EntityManager $entityManager
+     * @return array
+     */
     private function getFiles($entity, \Doctrine\ORM\EntityManager $entityManager)
     {
         $classMetaData = $entityManager->getClassMetaData(get_class($entity));
@@ -82,6 +108,9 @@ class FileSubscriber implements EventSubscriber
         }
     }
 
+    /**
+     * @param \Doctrine\ORM\Event\LifecycleEventArgs $ea
+     */
     public function prePersist(LifecycleEventArgs $ea)
     {
         $entity = $ea->getEntity();
@@ -90,6 +119,9 @@ class FileSubscriber implements EventSubscriber
         }
     }
 
+    /**
+     * @param \Doctrine\ORM\Event\LifecycleEventArgs $ea
+     */
     public function postPersist(LifecycleEventArgs $ea)
     {
         $entity = $ea->getEntity();
@@ -98,14 +130,37 @@ class FileSubscriber implements EventSubscriber
         }
     }
 
+    /**
+     * @param \Doctrine\ORM\Event\LifecycleEventArgs $ea
+     */
     public function postUpdate(LifecycleEventArgs $ea)
     {
         $entity = $ea->getEntity();
         foreach($this->getFiles($entity,$ea->getEntityManager()) as $file) {
-            $this->upload($ea, $entity,$file);
+            $propertyName = $file['property']->name;
+            $property = $entity->$propertyName;
+            if($property instanceof CondemnedFile) {
+                $this->removeUpload($entity, $file);
+            }
+            else {
+                $this->upload($ea, $entity,$file);
+            }
         }
     }
 
+    /**
+     * @param \Doctrine\ORM\Event\LifecycleEventArgs $ea
+     */
+    public function preRemove(LifecycleEventArgs $ea){
+        $entity = $ea->getEntity();
+        foreach($this->getFiles($entity,$ea->getEntityManager()) as $file) {
+            $this->preRemoveUpload($entity,$file);
+        }
+    }
+
+    /**
+     * @param \Doctrine\ORM\Event\LifecycleEventArgs $ea
+     */
     public function postRemove(LifecycleEventArgs $ea)
     {
         $entity = $ea->getEntity();
@@ -114,7 +169,12 @@ class FileSubscriber implements EventSubscriber
         }
     }
 
-    private function preUpload($ea, $fileEntity, $file)
+    /**
+     * @param $ea
+     * @param $fileEntity
+     * @param array $file
+     */
+    private function preUpload(EventArgs $ea, $fileEntity, array $file)
     {
         $propertyName = $file['property']->name;
         if (isset($fileEntity->$propertyName) && null !== $fileEntity->$propertyName) {
@@ -135,7 +195,12 @@ class FileSubscriber implements EventSubscriber
         }
     }
 
-    private function upload(LifecycleEventArgs $ea, $fileEntity, $file)
+    /**
+     * @param \Doctrine\ORM\Event\LifecycleEventArgs $ea
+     * @param $fileEntity
+     * @param array $file
+     */
+    private function upload(LifecycleEventArgs $ea, $fileEntity, array $file)
     {
         $propertyName = $file['property']->name;
         if (!isset($fileEntity->$propertyName) || null === $fileEntity->$propertyName) {
@@ -154,25 +219,46 @@ class FileSubscriber implements EventSubscriber
         $changeSet = $unitOfWork->getEntityChangeSet($fileEntity);
         if(array_key_exists($file['mappedBy'],$changeSet)) {
             $oldvalue = $changeSet[$file['mappedBy']][0];
-            if($oldvalue != '' && $oldvalue != NULL) {
+            if($oldvalue !== '' && $oldvalue !== NULL) {
                 @unlink($this->getUploadRootDir($fileEntity) . '/' . $oldvalue);
             }
         }
 
-        unset($fileEntity->$propertyName);
+        $fileEntity->$propertyName = null;
     }
 
-    private function removeUpload($fileEntity, $file)
+    /**
+     * @param $fileEntity
+     * @param array $file
+     */
+    private function removeUpload($fileEntity, array $file)
     {
-        if ($file['path'] != "") {
-            $getter = "get" . ucfirst(strtolower($file['mappedBy']));
-            $filePath = $fileEntity->$getter();
-            if($filePath != "") {
-                @unlink($this->getUploadRootDir($fileEntity) . '/' . $fileEntity->$getter());
-            }
+        if (isset($this->unlinkQueue[spl_object_hash($fileEntity)]) && is_file($this->unlinkQueue[spl_object_hash($fileEntity)])) {
+            unlink($this->unlinkQueue[spl_object_hash($fileEntity)]);
         }
     }
 
+    /**
+     * @param $fileEntity
+     * @param array $file
+     */
+    private function preRemoveUpload($fileEntity, array $file)
+    {
+        if ($file['path'] !== "") {
+            $getter = "get" . ucfirst(strtolower($file['mappedBy']));
+            $filePath = $fileEntity->$getter();
+            if($filePath !== "") {
+                $this->unlinkQueue[spl_object_hash($fileEntity)]= $this->getUploadRootDir() . $filePath;
+            }
+
+            $setter = "set" . ucfirst(strtolower($file['mappedBy']));
+            $fileEntity->$setter(null);
+        }
+    }
+
+    /**
+     * @return string
+     */
     private function getUploadRootDir()
     {
         // the absolute directory path where uploaded documents should be saved
