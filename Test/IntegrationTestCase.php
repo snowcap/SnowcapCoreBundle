@@ -67,8 +67,6 @@ abstract class IntegrationTestCase extends WebTestCase implements ContainerAware
     public function setUp()
     {
         $this->setContainer(static::$kernel->getContainer());
-
-        parent::setUp();
     }
 
     /**
@@ -79,8 +77,6 @@ abstract class IntegrationTestCase extends WebTestCase implements ContainerAware
     {
         // Shutdown the kernel.
         $this->setContainer(null);
-
-        parent::tearDown();
     }
 
     /**
