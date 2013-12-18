@@ -2,6 +2,8 @@
 
 namespace Snowcap\CoreBundle\Listener;
 
+use Snowcap\CoreBundle\Util\String;
+use Symfony\Component\Form\Util\PropertyPath;
 use Symfony\Component\HttpFoundation\File\File;
 use Doctrine\Common\EventSubscriber;
 use Doctrine\ORM\EntityManager;
@@ -84,7 +86,8 @@ class FileSubscriber implements EventSubscriber
                     'path' => $annotation->path,
                     'mappedBy' => $annotation->mappedBy,
                     'filename' => $annotation->filename,
-                    'meta' => $meta
+                    'meta' => $meta,
+                    'nameCallback' => $annotation->nameCallback
                 );
             }
         }
@@ -125,7 +128,7 @@ class FileSubscriber implements EventSubscriber
      * Return all the file fields for the provided entity
      *
      * @param $entity
-     * @param \Doctrine\ORM\EntityManager $entityManager
+     * @param \Doctrine\ORM\EntityManager $em
      * @return array
      */
     private function getFileFields($entity, EntityManager $em)
@@ -249,7 +252,7 @@ class FileSubscriber implements EventSubscriber
 
     /**
      * @param $fileEntity
-     * @param array $file
+     * @param array $fileConfig
      */
     private function preRemoveUpload($fileEntity, array $fileConfig)
     {
@@ -280,6 +283,32 @@ class FileSubscriber implements EventSubscriber
      */
     private function generateFileName($fileEntity, array $fileConfig)
     {
-        return $fileConfig['path'] . '/' . uniqid() . '.' . $fileConfig['property']->getValue($fileEntity)->guessExtension();
+        $path = $fileConfig['path'] . '/';
+        $ext = '.' . $fileConfig['property']->getValue($fileEntity)->guessExtension();
+
+        if ($fileConfig['nameCallback'] !== null) {
+            $propertyPath = new PropertyPath($fileConfig['nameCallback']);
+            $filename = $propertyPath->getValue($fileEntity);
+            $filename = String::slugify($filename);
+
+            /*
+             * Here we check if a file with the same name already exists
+             * If yes then we run until a filename is not already used
+             */
+            $i = 0;
+
+            do {
+                $testFile = $filename . (0 === $i ? '' : '-'.$i);
+                $i++;
+            }
+            while(file_exists($path . $testFile . $ext));
+
+            $filename = $testFile;
+        }
+        else {
+            $filename = uniqid();
+        }
+
+        return $path . $filename . $ext;
     }
 }
