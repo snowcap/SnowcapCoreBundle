@@ -8,14 +8,14 @@ use Symfony\Component\Validator\Constraints as Assert;
 
 /**
  * @ORM\Entity
- * @ORM\Table(name="user")
+ * @ORM\Table
  */
 class User {
     /**
      * @var integer
      *
      * @ORM\Id
-     * @ORM\Column(name="id", type="integer")
+     * @ORM\Column(type="integer")
      * @ORM\GeneratedValue(strategy="AUTO")
      */
     private $id;
@@ -23,23 +23,30 @@ class User {
     /**
      * @var string
      *
-     * @ORM\Column(name="username", type="string", length=255, nullable=true)
+     * @ORM\Column(type="string", length=255, nullable=true)
      */
     private $userName;
 
     /**
      * @var string
      *
-     * @ORM\Column(name="cv", type="string", length=255, nullable=true)
+     * @ORM\Column(type="string", length=255, nullable=true)
      */
     private $cv;
 
     /**
      * @var \Symfony\Component\HttpFoundation\File\File
      *
-     * @SnowcapORM\File(path="uploads/cvs", mappedBy="cv")
+     * @SnowcapORM\File(path="uploads/cvs", mappedBy="cv", filename="originalFilename")
      */
     private $cvFile;
+
+    /**
+     * @var string
+     *
+     * @ORM\Column(type="string", length=255, nullable=true)
+     */
+    private $originalFilename;
 
     /**
      * @return int
@@ -97,4 +104,11 @@ class User {
         return $this->userName;
     }
 
+    /**
+     * @return mixed
+     */
+    public function getOriginalFilename()
+    {
+        return $this->originalFilename;
+    }
 }

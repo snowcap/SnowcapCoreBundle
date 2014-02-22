@@ -4,20 +4,15 @@ namespace Snowcap\CoreBundle\Tests\Listener;
 
 use Doctrine\ORM\Tools\Setup;
 use Doctrine\ORM\EntityManager;
-use Doctrine\ORM\Mapping\Driver\AnnotationDriver;
-use Doctrine\Common\Annotations\AnnotationReader;
 use Doctrine\ORM\Tools\SchemaTool;
 use Doctrine\Common\Annotations\AnnotationRegistry;
-use Doctrine\ORM\Event\LoadClassMetadataEventArgs;
-use Doctrine\ORM\Event\LifecycleEventArgs;
-use Doctrine\ORM\Event\PreFlushEventArgs;
-use Symfony\Component\HttpFoundation\File\File;
+use Snowcap\CoreBundle\Tests\Listener\Fixtures\Entity\User;
 use Symfony\Component\Filesystem\Filesystem;
 
 use Snowcap\CoreBundle\Listener\FileSubscriber;
 use Snowcap\CoreBundle\File\CondemnedFile;
-use Snowcap\CoreBundle\Tests\Listener\Fixtures\Entity\User;
 use Snowcap\CoreBundle\Tests\Listener\Fixtures\Entity\Novel;
+use Symfony\Component\HttpFoundation\File\UploadedFile;
 
 class FileSubscriberTest extends \PHPUnit_Framework_TestCase
 {
@@ -25,11 +20,6 @@ class FileSubscriberTest extends \PHPUnit_Framework_TestCase
      * @var EntityManager
      */
     private $em;
-
-    /**
-     * @var FileSubscriber
-     */
-    private $subscriber;
 
     /**
      * @var string
@@ -86,187 +76,126 @@ class FileSubscriberTest extends \PHPUnit_Framework_TestCase
         $this->createSchema();
         $this->rootDir = sys_get_temp_dir() . '/' . uniqid();
 
-        $this->subscriber = new FileSubscriber($this->rootDir);
 
-        foreach($this->classes as $class) {
-            $metaDataEventArgs = new LoadClassMetadataEventArgs($this->em->getClassMetadata($class), $this->em);
-            $this->subscriber->loadClassMetadata($metaDataEventArgs);
-        }
+        $this->em->getEventManager()->addEventSubscriber(new FileSubscriber($this->rootDir));
 
         parent::setUp();
     }
 
-    /*
-    public function testPreFlushInsert()
+    public function testEntityInsertion()
     {
-        $user = $this->buildUserToInsert();
-        $eventArgs = new PreFlushEventArgs($this->em);
-        $this->subscriber->preFlush($eventArgs);
+        $novel = $this->buildNovel();
+        $novel->setAttachmentFile($this->buildFile('test.txt'));
+        $this->em->persist($novel);
+        $this->em->flush($novel);
 
-        $changeset = $this->em->getUnitOfWork()->getEntityChangeSet($user);
-        $this->assertArrayHasKey('cv', $changeset);
-        $this->assertNotNull($user->getCv());
-    }
-    */
-
-    /*
-    public function testPreFlushInsertForMappedSuperClass()
-    {
-        $novel = $this->buildNovelToInsert();
-        $eventArgs = new PreFlushEventArgs($this->em);
-        $this->subscriber->preFlush($eventArgs);
-
-        $changeset = $this->em->getUnitOfWork()->getEntityChangeSet($novel);
-        $this->assertArrayHasKey('attachment', $changeset);
         $this->assertNotNull($novel->getAttachment());
+        $this->assertFileExists($this->rootDir . '/' . $novel->getAttachment());
     }
-    */
 
-    public function testPreFlushUpdate()
+    public function testEntityInsertionWithFilename()
     {
-        $user = $this->buildUserToUpdate();
-        $eventArgs = new PreFlushEventArgs($this->em);
-        $this->subscriber->preFlush($eventArgs);
+        $user = $this->buildUser();
+        $user->setCvFile($this->buildFile('test.txt'));
+        $this->em->persist($user);
+        $this->em->flush($user);
 
-        $changeset = $this->em->getUnitOfWork()->getEntityChangeSet($user);
-        $this->assertArrayHasKey('cv', $changeset);
-        $this->assertNotNull($user->getCv());
+        $this->assertEquals('test_file.txt', $user->getOriginalFilename());
     }
 
-    public function testPostPersist()
+    public function testEntityUpdateWithoutPreviousFile()
     {
-        $user = $this->buildUserToInsert();
-        $cvPath = 'uploads/cvs/' . uniqid() . '.txt';
-        $user->setCv($cvPath);
+        $novel = $this->buildNovel();
+        $this->em->persist($novel);
+        $this->em->flush($novel);
+        $this->em->clear($novel);
 
-        $eventArgs = new LifecycleEventArgs($user, $this->em);
-        $this->subscriber->postPersist($eventArgs);
+        $novel = $this->em
+            ->getRepository('Snowcap\CoreBundle\Tests\Listener\Fixtures\Entity\Novel')
+            ->find($novel->getId());
+        $novel->setAttachmentFile($this->buildFile('test.txt'));
+        $this->em->flush($novel);
 
-        $this->assertNull($user->getCvFile());
-        $this->assertFileExists($this->rootDir .'/' . $cvPath);
+        $this->assertNotNull($novel->getAttachment());
+        $this->assertFileExists($this->rootDir . '/' . $novel->getAttachment());
     }
 
-    public function testPostPersistForMappedSuperClass()
+    public function testEntityUpdateWithPreviousFile()
     {
-        $novel = $this->buildNovelToInsert();
-        $attachmentPath = 'uploads/attachments/' . uniqid() . '.txt';
-        $novel->setAttachment($attachmentPath);
+        $novel = $this->buildNovel();
+        $novel->setAttachmentFile($this->buildFile('test1.txt'));
+        $this->em->persist($novel);
+        $this->em->flush($novel);
+        $this->em->clear($novel);
+        $oldAttachment = $novel->getAttachment();
 
-        $eventArgs = new LifecycleEventArgs($novel, $this->em);
-        $this->subscriber->postPersist($eventArgs);
+        $novel = $this->em
+            ->getRepository('Snowcap\CoreBundle\Tests\Listener\Fixtures\Entity\Novel')
+            ->find($novel->getId());
+        $novel->setAttachmentFile($this->buildFile('test2.txt'));
+        $this->em->flush($novel);
 
-        $this->assertNull($novel->getAttachmentFile());
-        $this->assertFileExists($this->rootDir .'/' . $attachmentPath);
+        $this->assertNotNull($novel->getAttachment());
+        $this->assertFileExists($this->rootDir . '/' . $novel->getAttachment());
+        $this->assertFileNotExists($this->rootDir . '/' . $oldAttachment);
     }
 
-    public function testPostUpdate()
+    public function testEntityUpdateWithCondemnedFile()
     {
-        $user = $this->buildUserToUpdate();
-        $cvPath = 'uploads/cvs/' . uniqid() . '.txt';
-        $user->setCv($cvPath);
+        $novel = $this->buildNovel();
+        $novel->setAttachmentFile($this->buildFile('test.txt'));
+        $this->em->persist($novel);
+        $this->em->flush($novel);
+        $this->em->clear($novel);
+        $oldAttachment = $novel->getAttachment();
 
-        $eventArgs = new LifecycleEventArgs($user, $this->em);
-        $this->subscriber->postUpdate($eventArgs);
+        $novel = $this->em
+            ->getRepository('Snowcap\CoreBundle\Tests\Listener\Fixtures\Entity\Novel')
+            ->find($novel->getId());
+        $novel->setAttachmentFile(new CondemnedFile());
+        $this->em->flush($novel);
 
-        $this->assertNull($user->getCvFile());
-        $this->assertFileExists($this->rootDir .'/' . $cvPath);
+        $this->assertNull($novel->getAttachment());
+        $this->assertFileNotExists($this->rootDir . '/' . $oldAttachment);
     }
 
-    public function testPostUpdateWithPrevousFile()
+    public function testEntityRemoval()
     {
-        $user = $this->buildUserToUpdate();
-        $oldCvPath = 'uploads/cvs/' . uniqid() . '.txt';
-        $newCvPath = 'uploads/cvs/' . uniqid() . '.txt';
-        $this->copyFile(__DIR__ . '/Fixtures/files/test_file.txt', '/' . $oldCvPath);
-        $user->setCv($newCvPath);
+        $novel = $this->buildNovel();
+        $novel->setAttachmentFile($this->buildFile('test.txt'));
+        $this->em->persist($novel);
+        $this->em->flush($novel);
+        $this->em->clear($novel);
+        $oldAttachment = $novel->getAttachment();
 
-        $this->em->getUnitOfWork()->propertyChanged($user, 'cv', $oldCvPath, $newCvPath);
+        $novel = $this->em
+            ->getRepository('Snowcap\CoreBundle\Tests\Listener\Fixtures\Entity\Novel')
+            ->find($novel->getId());
+        $novel->setAttachmentFile($this->buildFile('test2.txt'));
+        $this->em->remove($novel);
+        $this->em->flush($novel);
 
-        $this->assertFileExists($this->rootDir .'/' . $oldCvPath);
-
-        $eventArgs = new LifecycleEventArgs($user, $this->em);
-        $this->subscriber->postUpdate($eventArgs);
-
-        $this->assertNull($user->getCvFile());
-        $this->assertFileExists($this->rootDir .'/' . $newCvPath);
-        $this->assertFileNotExists($this->rootDir .'/' . $oldCvPath);
+        $this->assertFileNotExists($this->rootDir . '/' . $oldAttachment);
     }
 
-    public function testPostUpdateWithCondemnedFile()
-    {
-        $user = $this->buildUserToUpdate();
-        $cvPath = 'uploads/cvs/' . uniqid() . '.txt';
-        $this->copyFile(__DIR__ . '/Fixtures/files/test_file.txt', '/' . $cvPath);
-        $user->setCv($cvPath);
-
-        $this->assertFileExists($this->rootDir .'/' . $cvPath);
-        $user->setCvFile(new CondemnedFile());
-
-        $preFlushEventArgs = new PreFlushEventArgs($this->em);
-        $eventArgs = new LifecycleEventArgs($user, $this->em);
-        $this->subscriber->preFlush($preFlushEventArgs);
-        $this->subscriber->postUpdate($eventArgs);
-
-        $this->assertNull($user->getCvFile());
-        $this->assertFileNotExists($this->rootDir .'/' . $cvPath);
-    }
-
-    public function testPostRemove()
-    {
-        $user = $this->buildUserToDelete();
-        $cvPath = 'uploads/cvs/' . uniqid() . '.txt';
-        $this->copyFile(__DIR__ . '/Fixtures/files/test_file.txt', '/' . $cvPath);
-        $user->setCv($cvPath);
-
-        $this->assertFileExists($this->rootDir .'/' . $cvPath);
-
-        $eventArgs = new LifecycleEventArgs($user, $this->em);
-
-        $this->subscriber->preRemove($eventArgs);
-        $this->subscriber->postRemove($eventArgs);
-
-        $this->assertFileNotExists($this->rootDir .'/' . $cvPath);
-    }
-
-    /**
-     * @param string $from
-     * @param string $to
-     * @return string
-     */
-    private function copyFile($from, $to)
+    private function buildFile($fileName)
     {
         $fs = new Filesystem();
-        $targetPath = $this->rootDir . $to;
-        $fs->copy($from, $targetPath);
+        $targetPath = $this->rootDir . '/' . $fileName;
+        $fileName = __DIR__ . '/Fixtures/files/test_file.txt';
+        $fs->copy($fileName, $targetPath);
 
-        return $targetPath;
-    }
-
-    /**
-     * @return Fixtures\Entity\User
-     */
-    private function buildUserToInsert()
-    {
-        $user = new User();
-        $user->setUserName('johndoe');
-        $user->setCvFile(new File($this->copyFile(__DIR__ . '/Fixtures/files/test_file.txt', '/test_file.txt')));
-
-        $this->em->getUnitOfWork()->scheduleForInsert($user);
-
-        return $user;
+        return new UploadedFile($targetPath, $fileName, 'text/plain', filesize($fileName), null, true);
     }
 
     /**
      * @return Fixtures\Entity\Novel
      */
-    private function buildNovelToInsert()
+    private function buildNovel()
     {
         $novel = new Novel();
         $novel->setTitle('Dancing with the frogs');
         $novel->setSubtitle('An epic tale of man-frog love');
-        $novel->setAttachmentFile(new File($this->copyFile(__DIR__ . '/Fixtures/files/test_file.txt', '/test_file.txt')));
-
-        $this->em->getUnitOfWork()->scheduleForInsert($novel);
 
         return $novel;
     }
@@ -274,41 +203,10 @@ class FileSubscriberTest extends \PHPUnit_Framework_TestCase
     /**
      * @return Fixtures\Entity\User
      */
-    private function buildUserToUpdate()
+    private function buildUser()
     {
-        $userName = 'johndoe';
-        $cvFile = new File($this->copyFile(__DIR__ . '/Fixtures/files/test_file.txt', '/test_file.txt'));
-
         $user = new User();
-        $user->setUserName($userName);
-        $user->setCvFile($cvFile);
-
-        $this->em->getUnitOfWork()->registerManaged($user, array(1), array(
-            'userName' => $userName,
-            'cvFile' => $cvFile
-        ));
-        $this->em->getUnitOfWork()->scheduleForUpdate($user);
-
-        return $user;
-    }
-
-    /**
-     * @return Fixtures\Entity\User
-     */
-    private function buildUserToDelete()
-    {
-        $userName = 'johndoe';
-        $cvFile = new File($this->copyFile(__DIR__ . '/Fixtures/files/test_file.txt', '/test_file.txt'));
-
-        $user = new User();
-        $user->setUserName($userName);
-        $user->setCvFile($cvFile);
-
-        $this->em->getUnitOfWork()->registerManaged($user, array(1), array(
-            'userName' => $userName,
-            'cvFile' => $cvFile
-        ));
-        $this->em->getUnitOfWork()->scheduleForDelete($user);
+        $user->setUserName('pvanliefland');
 
         return $user;
     }

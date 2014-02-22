@@ -5,18 +5,23 @@ namespace Snowcap\CoreBundle\Listener;
 use Doctrine\Common\Annotations\AnnotationException;
 use Doctrine\Common\Annotations\AnnotationReader;
 use Doctrine\ORM\Event\OnFlushEventArgs;
+use Doctrine\ORM\Event\PostFlushEventArgs;
 use Snowcap\CoreBundle\Util\String;
 use Symfony\Component\HttpFoundation\File\File;
 use Doctrine\Common\EventSubscriber;
 use Doctrine\ORM\EntityManager;
-use Doctrine\ORM\Event\LifecycleEventArgs;
-use Doctrine\ORM\Event\LoadClassMetadataEventArgs;
 use Doctrine\ORM\Event\PreFlushEventArgs;
 use Doctrine\ORM\Events;
 
 use Snowcap\CoreBundle\File\CondemnedFile;
 use Symfony\Component\PropertyAccess\PropertyAccess;
 
+/**
+ * This class is a Doctrine EventSubscriber that listens to Doctrine events and handle file uploads as well as
+ * file deletions performed on entities
+ *
+ * @package Snowcap\CoreBundle\Listener
+ */
 class FileSubscriber implements EventSubscriber
 {
     /**
@@ -28,6 +33,16 @@ class FileSubscriber implements EventSubscriber
      * @var array
      */
     private $unlinkQueue = array();
+
+    /**
+     * @var array
+     */
+    private $uploadEntities = array();
+
+    /**
+     * @var array
+     */
+    private $condemnedEntities = array();
 
     /**
      * @var string
@@ -50,136 +65,202 @@ class FileSubscriber implements EventSubscriber
     public function getSubscribedEvents()
     {
         return array(
-            Events::loadClassMetadata,
             Events::preFlush,
             Events::onFlush,
-            Events::postPersist,
-            Events::postUpdate,
-            Events::preRemove,
-            Events::postRemove,
+            Events::postFlush
         );
     }
 
     /**
-     * @param \Doctrine\ORM\Event\LoadClassMetadataEventArgs $eventArgs
-     * @throws \UnexpectedValueException
-     */
-    public function loadClassMetadata(LoadClassMetadataEventArgs $eventArgs)
-    {
-        $reader = new AnnotationReader();
-        $meta = $eventArgs->getClassMetadata();
-        foreach ($meta->getReflectionClass()->getProperties() as $property) {
-            if ($meta->isMappedSuperclass && !$property->isPrivate() ||
-                $meta->isInheritedField($property->name) ||
-                isset($meta->associationMappings[$property->name]['inherited'])
-            ) {
-                continue;
-            }
-            if ($annotation = $reader->getPropertyAnnotation($property, 'Snowcap\\CoreBundle\\Doctrine\\Mapping\\File')) {
-                $property->setAccessible(true);
-                $field = $property->getName();
-
-                if (null === $annotation->mappedBy) {
-                    throw AnnotationException::requiredError(
-                        'mappedBy',
-                        'SnowcapCore\File',
-                        $meta->getReflectionClass()->getName(),
-                        'another class property to map onto'
-                    );
-                }
-                if (null === $annotation->path && null === $annotation->pathCallback) {
-                    throw AnnotationException::syntaxError(
-                        sprintf(
-                            'Annotation @%s declared on %s expects "path" or "pathCallback". One of them should not be null.',
-                            'SnowcapCore\File',
-                            $meta->getReflectionClass()->getName()
-                        )
-                    );
-                }
-                if (!$meta->hasField($annotation->mappedBy)) {
-                    throw AnnotationException::syntaxError(
-                        sprintf(
-                            'The entity "%s" has no field named "%s", but it is documented in the annotation @%s',
-                            $meta->getReflectionClass()->getName(),
-                            $annotation->mappedBy,
-                            'SnowcapCore\File'
-                        )
-                    );
-                }
-
-                $this->config[$meta->getName()]['fields'][$field] = array(
-                    'property' => $property,
-                    'path' => $annotation->path,
-                    'mappedBy' => $annotation->mappedBy,
-                    'filename' => $annotation->filename,
-                    'meta' => $meta,
-                    'nameCallback' => $annotation->nameCallback,
-                    'pathCallback' => $annotation->pathCallback,
-                );
-            }
-        }
-    }
-
-    /**
+     * Before flush, we need to update the config array with all the properties of entities about to be
+     * inserted, updated or removed and which correspond to a SnowcapCoreBundle File annotation
+     *
      * @param \Doctrine\ORM\Event\PreFlushEventArgs $ea
+     * @throws \Doctrine\Common\Annotations\AnnotationException
      */
     public function preFlush(PreFlushEventArgs $ea)
     {
-        $entityManager = $ea->getEntityManager();
-
-        // Hit fix, see http://doctrine-project.org/jira/browse/DDC-2276
-        // @todo: wait for real fix
-        if(!$entityManager instanceOf EntityManager) {
+        if (!empty($this->config)) {
             return;
         }
+
+        $entityManager = $ea->getEntityManager();
         $unitOfWork = $entityManager->getUnitOfWork();
 
-        // Finally, check all entities in identity map - if they have a file object they need to be processed
-        foreach($unitOfWork->getIdentityMap() as $entities) {
-            foreach($entities as $fileEntity) {
-                foreach($this->getFileFields($fileEntity, $entityManager) as $fileConfig) {
-                    $propertyValue = $fileConfig['property']->getValue($fileEntity);
-                    if($propertyValue instanceof CondemnedFile) {
-                        $this->preRemoveUpload($fileEntity, $fileConfig);
+        $scheduledEntities = array_merge(
+            $unitOfWork->getScheduledEntityInsertions(),
+            $unitOfWork->getScheduledEntityUpdates(),
+            $unitOfWork->getScheduledEntityDeletions()
+        );
+        $scheduledEntityClassNames = array_unique(array_map(function ($entity) {
+            return get_class($entity);
+        }, $scheduledEntities));
+
+        $reader = new AnnotationReader();
+
+        // Loop over all the class names of entities about to be inserted, updated or removed
+        foreach ($scheduledEntityClassNames as $className) {
+            if (isset($this->config[$className])) { // Skip this entity if we already have a config for it
+                return;
+            }
+
+            $meta = $entityManager->getClassMetadata($className);
+
+            // Loop over all of the properties of the class
+            foreach ($meta->getReflectionClass()->getProperties() as $property) {
+
+                // Skip if mappedSuperclass, private property or some other special case
+                if ($meta->isMappedSuperclass && !$property->isPrivate() ||
+                    $meta->isInheritedField($property->name) ||
+                    isset($meta->associationMappings[$property->name]['inherited'])
+                ) {
+                    continue;
+                }
+
+                // Check if the property corresponds to the SnowcapCoreBundle File annotation
+                $annotationClass = 'Snowcap\\CoreBundle\\Doctrine\\Mapping\\File';
+                if ($annotation = $reader->getPropertyAnnotation($property, $annotationClass)) {
+                    $property->setAccessible(true);
+                    $field = $property->getName();
+
+                    // Validation
+                    if (null === $annotation->mappedBy) {
+                        throw AnnotationException::requiredError(
+                            'mappedBy',
+                            'SnowcapCore\File',
+                            $meta->getReflectionClass()->getName(),
+                            'another class property to map onto'
+                        );
                     }
-                    else {
-                        $this->preUpload($ea, $fileEntity, $fileConfig);
+                    if (null === $annotation->path && null === $annotation->pathCallback) {
+                        throw AnnotationException::syntaxError(
+                            sprintf(
+                                'Annotation @%s declared on %s expects "path" or "pathCallback". One of them should not be null.',
+                                'SnowcapCore\File',
+                                $meta->getReflectionClass()->getName()
+                            )
+                        );
                     }
+                    if (!$meta->hasField($annotation->mappedBy)) {
+                        throw AnnotationException::syntaxError(
+                            sprintf(
+                                'The entity "%s" has no field named "%s", but it is documented in the annotation @%s',
+                                $meta->getReflectionClass()->getName(),
+                                $annotation->mappedBy,
+                                'SnowcapCore\File'
+                            )
+                        );
+                    }
+
+                    $this->config[$className]['fields'][$field] = array(
+                        'file' => $property,
+                        'path' => $annotation->path,
+                        'mappedBy' => $annotation->mappedBy,
+                        'filename' => $annotation->filename,
+                        'meta' => $meta,
+                        'nameCallback' => $annotation->nameCallback,
+                        'pathCallback' => $annotation->pathCallback,
+                    );
                 }
             }
         }
     }
 
     /**
+     * When flushing, we check all the entities about to be inserted, updated or removed and we perform pre-upload
+     * or pre-remove upload operations
+     *
      * @param \Doctrine\ORM\Event\OnFlushEventArgs $ea
      */
-    public function OnFlush(OnFlushEventArgs $ea)
+    public function onFlush(OnFlushEventArgs $ea)
     {
         $entityManager = $ea->getEntityManager();
-
-        // Hit fix, see http://doctrine-project.org/jira/browse/DDC-2276
-        // @todo: wait for real fix
-        if(!$entityManager instanceOf EntityManager) {
-            return;
-        }
         $unitOfWork = $entityManager->getUnitOfWork();
 
+        // First, check all entities in identity map - if they have a file object they need to be processed
+        foreach ($unitOfWork->getIdentityMap() as $entities) {
+            foreach ($entities as $fileEntity) {
+                foreach ($this->getFileProperties($fileEntity, $entityManager) as $fileConfig) {
+                    if (
+                        $fileConfig['file']->getValue($fileEntity) instanceof File &&
+                        !$unitOfWork->isScheduledForUpdate($fileEntity) &&
+                        !$unitOfWork->isScheduledForDelete($fileEntity)
+                    ) {
+                        $unitOfWork->scheduleForUpdate($fileEntity);
+                    }
+                }
+            }
+        }
+
         // Then, let's deal with entities schedules for insertion
-        foreach($unitOfWork->getScheduledEntityInsertions() as $fileEntity){
-            foreach ($this->getFileFields($fileEntity, $entityManager) as $fileConfig) {
-                $this->preUpload($ea, $fileEntity, $fileConfig);
+        foreach ($unitOfWork->getScheduledEntityInsertions() as $fileEntity) {
+            if ($unitOfWork->isScheduledForDelete($fileEntity)) {
+                break;
+            }
+
+            foreach ($this->getFileProperties($fileEntity, $entityManager) as $fileConfig) {
+                $propertyValue = $fileConfig['file']->getValue($fileEntity);
+                if ($propertyValue instanceof File) {
+                    $this->preUpload($ea, $fileEntity, $fileConfig);
+                }
+            }
+        }
+        // Then, let's deal with entities schedules for updates
+        foreach ($unitOfWork->getScheduledEntityUpdates() as $fileEntity) {
+            if ($unitOfWork->isScheduledForDelete($fileEntity)) {
+                break;
+            }
+
+            foreach ($this->getFileProperties($fileEntity, $entityManager) as $fileConfig) {
+                $propertyValue = $fileConfig['file']->getValue($fileEntity);
+                if ($propertyValue instanceof CondemnedFile) {
+                    $this->preRemoveUpload($ea, $fileEntity, $fileConfig);
+                } elseif ($propertyValue instanceof File) {
+                    $this->preUpload($ea, $fileEntity, $fileConfig);
+                }
+            }
+        }
+        // Then, let's deal with entities schedules for deletions
+        foreach ($unitOfWork->getScheduledEntityDeletions() as $fileEntity) {
+            foreach ($this->getFileProperties($fileEntity, $entityManager) as $fileConfig) {
+                $mappedByValue = $fileConfig['meta']->getFieldValue($fileEntity, $fileConfig['mappedBy']);
+                if (null !== $mappedByValue) {
+                    $this->preRemoveUpload($ea, $fileEntity, $fileConfig);
+                }
             }
         }
     }
 
     /**
-     * Return all the file fields for the provided entity
+     * After the flush, we loop over entities that need "upload" or "condemn" operations
+     *
+     * @param \Doctrine\ORM\Event\PostFlushEventArgs $ea
+     */
+    public function postFlush(PostFlushEventArgs $ea)
+    {
+        foreach ($this->uploadEntities as $uploadEntity) {
+            foreach ($this->getFileProperties($uploadEntity, $ea->getEntityManager()) as $fileConfig) {
+                $this->upload($ea, $uploadEntity, $fileConfig);
+            }
+        }
+        foreach ($this->condemnedEntities as $uploadEntity) {
+            foreach ($this->getFileProperties($uploadEntity, $ea->getEntityManager()) as $fileConfig) {
+                $this->removeUpload($uploadEntity, $fileConfig);
+            }
+        }
+
+        $this->uploadEntities = array();
+        $this->condemnedEntities = array();
+    }
+
+    /**
+     * Return all properties of the provided entity that correspond to a SnowcapCoreBundle File annotation
      *
      * @param $entity
      * @param \Doctrine\ORM\EntityManager $em
      * @return array
      */
-    private function getFileFields($entity, EntityManager $em)
+    private function getFileProperties($entity, EntityManager $em)
     {
         $classMetaData = $em->getClassMetaData(get_class($entity));
         $className = $classMetaData->getName();
@@ -187,149 +268,104 @@ class FileSubscriber implements EventSubscriber
         if (array_key_exists($className, $this->config)) {
             return $this->config[$className]['fields'];
         }
+
         return array();
     }
 
     /**
-     * @param \Doctrine\ORM\Event\LifecycleEventArgs $ea
-     */
-    public function postPersist(LifecycleEventArgs $ea)
-    {
-        $this->postSave($ea);
-    }
-
-    /**
-     * @param \Doctrine\ORM\Event\LifecycleEventArgs $ea
-     */
-    public function postUpdate(LifecycleEventArgs $ea)
-    {
-        $this->postSave($ea);
-    }
-
-    /**
-     * @param \Doctrine\ORM\Event\LifecycleEventArgs $ea
-     */
-    public function preRemove(LifecycleEventArgs $ea)
-    {
-        $entity = $ea->getEntity();
-        foreach ($this->getFileFields($entity, $ea->getEntityManager()) as $fileConfig) {
-            $this->preRemoveUpload($entity, $fileConfig);
-        }
-    }
-
-    /**
-     * @param \Doctrine\ORM\Event\LifecycleEventArgs $ea
-     */
-    public function postRemove(LifecycleEventArgs $ea)
-    {
-        $entity = $ea->getEntity();
-        foreach ($this->getFileFields($entity, $ea->getEntityManager()) as $fileConfig) {
-            $this->removeUpload($entity, $fileConfig);
-        }
-    }
-
-    /**
-     * @param \Doctrine\ORM\Event\LifecycleEventArgs $ea
-     */
-    private function postSave(LifecycleEventArgs $ea)
-    {
-        $fileEntity = $ea->getEntity();
-        foreach ($this->getFileFields($fileEntity, $ea->getEntityManager()) as $fileConfig) {
-            $propertyValue = $fileConfig['property']->getValue($fileEntity);
-            if($propertyValue instanceof CondemnedFile) {
-                $this->removeUpload($fileEntity, $fileConfig);
-            }
-            else {
-                $this->upload($ea, $fileEntity, $fileConfig);
-            }
-        }
-    }
-
-    /**
-     * @param $ea
-     * @param $fileEntity
+     * To prepare the upload, we need to generate a file name and optionally, store the original file name
+     *
+     * @param \Doctrine\ORM\Event\OnFlushEventArgs $ea
+     * @param object $fileEntity
      * @param array $fileConfig
      */
-    private function preUpload($ea, $fileEntity, array $fileConfig)
+    private function preUpload(OnFlushEventArgs $ea, $fileEntity, array $fileConfig)
     {
-        $propertyValue = $fileConfig['property']->getValue($fileEntity);
-        if ($propertyValue instanceof File) {
-            $oldMappedValue = $fileConfig['meta']->getFieldValue($fileEntity, $fileConfig['mappedBy']);
-            $newMappedValue = $this->generateFileName($fileEntity, $fileConfig);
-            $fileConfig['meta']->setFieldValue($fileEntity, $fileConfig['mappedBy'], $newMappedValue);
+        // Update the mapped property on the entity with the generated file name
+        $newMappedValue = $this->generateFileName($fileEntity, $fileConfig);
+        $this->changePropertyVaue($ea, $fileConfig, $fileEntity, 'mappedBy', $newMappedValue);
 
-            $entityManager = $ea->getEntityManager();
-            $entityManager->getUnitOfWork()->propertyChanged($fileEntity, $fileConfig['mappedBy'], $oldMappedValue, $newMappedValue);
-
-            if ($fileConfig['filename'] !== null) {
-                $oldFilename = $fileConfig['meta']->getFieldValue($fileEntity, $fileConfig['filename']);
-                $newFilename = $propertyValue->getClientOriginalName();
-
-                $fileConfig['meta']->setFieldValue($fileEntity, $fileConfig['filename'], $newFilename);
-                $entityManager->getUnitOfWork()->propertyChanged($fileEntity, $fileConfig['filename'], $oldFilename, $newFilename);
-            }
+        // The "filename" property allows us to store the original file name on another entity property
+        if ($fileConfig['filename'] !== null) {
+            $file = $fileConfig['file']->getValue($fileEntity);
+            $newFilename = $file->getClientOriginalName();
+            $this->changePropertyVaue($ea, $fileConfig, $fileEntity, 'filename', $newFilename);
         }
+
+        $this->uploadEntities[] = $fileEntity;
     }
 
     /**
-     * @param \Doctrine\ORM\Event\LifecycleEventArgs $ea
-     * @param $fileEntity
+     * Perform the upload operation itself
+     *
+     * @param PostFlushEventArgs $ea
+     * @param object $fileEntity
      * @param array $fileConfig
      */
-    private function upload(LifecycleEventArgs $ea, $fileEntity, array $fileConfig)
+    private function upload(PostFlushEventArgs $ea, $fileEntity, array $fileConfig)
     {
-        $propertyValue = $fileConfig['property']->getValue($fileEntity);
-        if (!$propertyValue instanceof File) {
-            return;
-        }
-
+        // Move uploaded file
+        $file = $fileConfig['file']->getValue($fileEntity);
         $mappedValue = $fileConfig['meta']->getFieldValue($fileEntity, $fileConfig['mappedBy']);
         $filename = basename($mappedValue);
         $path = dirname($mappedValue);
-
-        $propertyValue->move($this->uploadDir . '/' .  $path, $filename);
+        $file->move($this->uploadDir . '/' . $path, $filename);
 
         // Remove previous file
         $unitOfWork = $ea->getEntityManager()->getUnitOfWork();
         $changeSet = $unitOfWork->getEntityChangeSet($fileEntity);
         if (array_key_exists($fileConfig['mappedBy'], $changeSet)) {
-            $oldvalue = $changeSet[$fileConfig['mappedBy']][0];
-            if (null !== $oldvalue) {
-                @unlink($this->uploadDir . '/' . $oldvalue);
+            $oldValue = $changeSet[$fileConfig['mappedBy']][0];
+            if (null !== $oldValue) {
+                @unlink($this->uploadDir . '/' . $oldValue);
             }
         }
 
-        $fileConfig['property']->setValue($fileEntity, null);
+        $fileConfig['file']->setValue($fileEntity, null);
     }
 
     /**
-     * @param $fileEntity
+     * Before the "condemn" operation, we clear the "mappedBy" and if needed, the "filename" values
+     *
+     * @param \Doctrine\ORM\Event\OnFlushEventArgs $ea
+     * @param object $fileEntity
      * @param array $fileConfig
      */
-    private function preRemoveUpload($fileEntity, array $fileConfig)
+    private function preRemoveUpload(OnFlushEventArgs $ea, $fileEntity, array $fileConfig)
     {
-        $mappedValue = $fileConfig['meta']->getFieldValue($fileEntity, $fileConfig['mappedBy']);
+        // Clear the "mappedBy" property
+        $oldMappedByValue = $this->changePropertyVaue($ea, $fileConfig, $fileEntity, 'mappedBy', null);
 
-        if(!empty($mappedValue)) {
-            $fileConfig['meta']->setFieldValue($fileEntity, $fileConfig['mappedBy'], null);
-            $this->unlinkQueue[spl_object_hash($fileEntity)]= $this->uploadDir . '/' . $mappedValue;
+        // The "filename" property needs to be cleared as well
+        if ($fileConfig['filename'] !== null) {
+            $this->changePropertyVaue($ea, $fileConfig, $fileEntity, 'filename', null);
         }
+
+        $this->unlinkQueue[spl_object_hash($fileEntity)] = $this->uploadDir . '/' . $oldMappedByValue;
+        $this->condemnedEntities[] = $fileEntity;
     }
 
     /**
-     * @param $fileEntity
+     * The "condemn" operation itself
+     *
+     * @param object $fileEntity
      * @param array $fileConfig
      */
     private function removeUpload($fileEntity, array $fileConfig)
     {
-        if (isset($this->unlinkQueue[spl_object_hash($fileEntity)]) && is_file($this->unlinkQueue[spl_object_hash($fileEntity)])) {
+        if (
+            isset($this->unlinkQueue[spl_object_hash($fileEntity)]) &&
+            is_file($this->unlinkQueue[spl_object_hash($fileEntity)])
+        ) {
             unlink($this->unlinkQueue[spl_object_hash($fileEntity)]);
         }
-        $fileConfig['property']->setValue($fileEntity, null);
+        $fileConfig['file']->setValue($fileEntity, null);
     }
 
     /**
-     * @param $fileEntity
+     * Generate the filename for the entity, either randomly or by using name and path callbacks
+     *
+     * @param object $fileEntity
      * @param array $fileConfig
      * @return string
      */
@@ -341,31 +377,47 @@ class FileSubscriber implements EventSubscriber
             $path = $accessor->getValue($fileEntity, $fileConfig['pathCallback']);
         }
         $path .= '/';
-        $ext = '.' . $fileConfig['property']->getValue($fileEntity)->guessExtension();
+        $ext = '.' . $fileConfig['file']->getValue($fileEntity)->guessExtension();
 
         if ($fileConfig['nameCallback'] !== null) {
             $accessor = PropertyAccess::createPropertyAccessor();
             $filename = $accessor->getValue($fileEntity, $fileConfig['nameCallback']);
             $filename = String::slugify($filename);
 
-            /*
-             * Here we check if a file with the same name already exists
-             * If yes then we run until a filename is not already used
-             */
+            // If a file with the same name already exists, append increment until a unique one is found
             $i = 0;
-
             do {
-                $testFile = $filename . (0 === $i ? '' : '-'.$i);
+                $testFile = $filename . (0 === $i ? '' : '-' . $i);
                 $i++;
-            }
-            while(file_exists($path . $testFile . $ext));
+            } while (file_exists($path . $testFile . $ext));
 
             $filename = $testFile;
-        }
-        else {
+        } else {
             $filename = uniqid();
         }
 
         return $path . $filename . $ext;
+    }
+
+    /**
+     * Change a property value and marked it as changed in the unit of work
+     * 
+     * @param \Doctrine\Common\EventArgs $ea
+     * @param array $fileConfig
+     * @param object $fileEntity
+     * @param string $configKey
+     * @param string $newValue
+     * @return string
+     */
+    private function changePropertyVaue($ea, $fileConfig, $fileEntity, $configKey, $newValue)
+    {
+        $oldValue = $fileConfig['meta']->getFieldValue($fileEntity, $fileConfig[$configKey]);
+        $fileConfig['meta']->setFieldValue($fileEntity, $fileConfig[$configKey], $newValue);
+        $ea
+            ->getEntityManager()
+            ->getUnitOfWork()
+            ->propertyChanged($fileEntity, $fileConfig[$configKey], $oldValue, $newValue);
+
+        return $oldValue;
     }
 }
