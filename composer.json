@@ -41,8 +41,7 @@
     "target-dir": "Snowcap/CoreBundle",
     "extra": {
         "branch-alias": {
-            "dev-master": "2.3.x-dev",
-            "dev-config_preflush":  "2.3.x-dev"
+            "dev-master": "2.3.x-dev"
         }
     }
 }
