@@ -65,105 +65,9 @@ class FileSubscriber implements EventSubscriber
     public function getSubscribedEvents()
     {
         return array(
-            Events::preFlush,
             Events::onFlush,
             Events::postFlush
         );
-    }
-
-    /**
-     * Before flush, we need to update the config array with all the properties of entities about to be
-     * inserted, updated or removed and which correspond to a SnowcapCoreBundle File annotation
-     *
-     * @param \Doctrine\ORM\Event\PreFlushEventArgs $ea
-     * @throws \Doctrine\Common\Annotations\AnnotationException
-     */
-    public function preFlush(PreFlushEventArgs $ea)
-    {
-        if (!empty($this->config)) {
-            return;
-        }
-
-        $entityManager = $ea->getEntityManager();
-        $unitOfWork = $entityManager->getUnitOfWork();
-
-        $scheduledEntities = array_merge(
-            $unitOfWork->getScheduledEntityInsertions(),
-            $unitOfWork->getScheduledEntityUpdates(),
-            $unitOfWork->getScheduledEntityDeletions()
-        );
-        $scheduledEntityClassNames = array_unique(array_map(function ($entity) {
-            return get_class($entity);
-        }, $scheduledEntities));
-
-        $reader = new AnnotationReader();
-
-        // Loop over all the class names of entities about to be inserted, updated or removed
-        foreach ($scheduledEntityClassNames as $className) {
-            if (isset($this->config[$className])) { // Skip this entity if we already have a config for it
-                return;
-            }
-
-            $meta = $entityManager->getClassMetadata($className);
-
-            // Loop over all of the properties of the class
-            foreach ($meta->getReflectionClass()->getProperties() as $property) {
-
-                // Skip if mappedSuperclass, private property or some other special case
-                if ($meta->isMappedSuperclass && !$property->isPrivate() ||
-                    $meta->isInheritedField($property->name) ||
-                    isset($meta->associationMappings[$property->name]['inherited'])
-                ) {
-                    continue;
-                }
-
-                // Check if the property corresponds to the SnowcapCoreBundle File annotation
-                $annotationClass = 'Snowcap\\CoreBundle\\Doctrine\\Mapping\\File';
-                if ($annotation = $reader->getPropertyAnnotation($property, $annotationClass)) {
-                    $property->setAccessible(true);
-                    $field = $property->getName();
-
-                    // Validation
-                    if (null === $annotation->mappedBy) {
-                        throw AnnotationException::requiredError(
-                            'mappedBy',
-                            'SnowcapCore\File',
-                            $meta->getReflectionClass()->getName(),
-                            'another class property to map onto'
-                        );
-                    }
-                    if (null === $annotation->path && null === $annotation->pathCallback) {
-                        throw AnnotationException::syntaxError(
-                            sprintf(
-                                'Annotation @%s declared on %s expects "path" or "pathCallback". One of them should not be null.',
-                                'SnowcapCore\File',
-                                $meta->getReflectionClass()->getName()
-                            )
-                        );
-                    }
-                    if (!$meta->hasField($annotation->mappedBy)) {
-                        throw AnnotationException::syntaxError(
-                            sprintf(
-                                'The entity "%s" has no field named "%s", but it is documented in the annotation @%s',
-                                $meta->getReflectionClass()->getName(),
-                                $annotation->mappedBy,
-                                'SnowcapCore\File'
-                            )
-                        );
-                    }
-
-                    $this->config[$className]['fields'][$field] = array(
-                        'file' => $property,
-                        'path' => $annotation->path,
-                        'mappedBy' => $annotation->mappedBy,
-                        'filename' => $annotation->filename,
-                        'meta' => $meta,
-                        'nameCallback' => $annotation->nameCallback,
-                        'pathCallback' => $annotation->pathCallback,
-                    );
-                }
-            }
-        }
     }
 
     /**
@@ -177,9 +81,13 @@ class FileSubscriber implements EventSubscriber
         $entityManager = $ea->getEntityManager();
         $unitOfWork = $entityManager->getUnitOfWork();
 
-        // First, check all entities in identity map - if they have a file object they need to be processed
+        // First, check all entities in identity map - if they have a file object they need to be processed, so
+        // we will "manually" schedule them for updates. Without this code, entities for which only a file property
+        // is changed are not scheuled for update
         foreach ($unitOfWork->getIdentityMap() as $entities) {
             foreach ($entities as $fileEntity) {
+                $this->loadFileConfig($fileEntity, $entityManager); // Load file subscriber config for the entity
+
                 foreach ($this->getFileProperties($fileEntity, $entityManager) as $fileConfig) {
                     if (
                         $fileConfig['file']->getValue($fileEntity) instanceof File &&
@@ -198,6 +106,8 @@ class FileSubscriber implements EventSubscriber
                 break;
             }
 
+            $this->loadFileConfig($fileEntity, $entityManager); // Load file subscriber config for the entity
+
             foreach ($this->getFileProperties($fileEntity, $entityManager) as $fileConfig) {
                 $propertyValue = $fileConfig['file']->getValue($fileEntity);
                 if ($propertyValue instanceof File) {
@@ -205,11 +115,14 @@ class FileSubscriber implements EventSubscriber
                 }
             }
         }
+
         // Then, let's deal with entities schedules for updates
         foreach ($unitOfWork->getScheduledEntityUpdates() as $fileEntity) {
             if ($unitOfWork->isScheduledForDelete($fileEntity)) {
                 break;
             }
+
+            $this->loadFileConfig($fileEntity, $entityManager); // Load file subscriber config for the entity
 
             foreach ($this->getFileProperties($fileEntity, $entityManager) as $fileConfig) {
                 $propertyValue = $fileConfig['file']->getValue($fileEntity);
@@ -220,8 +133,11 @@ class FileSubscriber implements EventSubscriber
                 }
             }
         }
+
         // Then, let's deal with entities schedules for deletions
         foreach ($unitOfWork->getScheduledEntityDeletions() as $fileEntity) {
+            $this->loadFileConfig($fileEntity, $entityManager); // Load file subscriber config for the entity
+
             foreach ($this->getFileProperties($fileEntity, $entityManager) as $fileConfig) {
                 $mappedByValue = $fileConfig['meta']->getFieldValue($fileEntity, $fileConfig['mappedBy']);
                 if (null !== $mappedByValue) {
@@ -251,6 +167,82 @@ class FileSubscriber implements EventSubscriber
 
         $this->uploadEntities = array();
         $this->condemnedEntities = array();
+    }
+
+    /**
+     * Load the file subscriber config for the provided entity
+     *
+     * @param object $entity
+     * @param \Doctrine\ORM\EntityManager $entityManager
+     * @throws \Doctrine\Common\Annotations\AnnotationException
+     */
+    private function loadFileConfig($entity, EntityManager $entityManager)
+    {
+        $reader = new AnnotationReader();
+        $className = get_class($entity);
+        if (isset($this->config[$className])) { // Skip this entity if we already have a config for it
+            return;
+        }
+
+        $meta = $entityManager->getClassMetadata($className);
+
+        // Loop over all of the properties of the class
+        foreach ($meta->getReflectionClass()->getProperties() as $property) {
+
+            // Skip if mappedSuperclass, private property or some other special case
+            if ($meta->isMappedSuperclass && !$property->isPrivate() ||
+                $meta->isInheritedField($property->name) ||
+                isset($meta->associationMappings[$property->name]['inherited'])
+            ) {
+                continue;
+            }
+
+            // Check if the property corresponds to the SnowcapCoreBundle File annotation
+            $annotationClass = 'Snowcap\\CoreBundle\\Doctrine\\Mapping\\File';
+            if ($annotation = $reader->getPropertyAnnotation($property, $annotationClass)) {
+                $property->setAccessible(true);
+                $field = $property->getName();
+
+                // Validation
+                if (null === $annotation->mappedBy) {
+                    throw AnnotationException::requiredError(
+                        'mappedBy',
+                        'SnowcapCore\File',
+                        $meta->getReflectionClass()->getName(),
+                        'another class property to map onto'
+                    );
+                }
+                if (null === $annotation->path && null === $annotation->pathCallback) {
+                    throw AnnotationException::syntaxError(
+                        sprintf(
+                            'Annotation @%s declared on %s expects "path" or "pathCallback". One of them should not be null.',
+                            'SnowcapCore\File',
+                            $meta->getReflectionClass()->getName()
+                        )
+                    );
+                }
+                if (!$meta->hasField($annotation->mappedBy)) {
+                    throw AnnotationException::syntaxError(
+                        sprintf(
+                            'The entity "%s" has no field named "%s", but it is documented in the annotation @%s',
+                            $meta->getReflectionClass()->getName(),
+                            $annotation->mappedBy,
+                            'SnowcapCore\File'
+                        )
+                    );
+                }
+
+                $this->config[$className]['fields'][$field] = array(
+                    'file' => $property,
+                    'path' => $annotation->path,
+                    'mappedBy' => $annotation->mappedBy,
+                    'filename' => $annotation->filename,
+                    'meta' => $meta,
+                    'nameCallback' => $annotation->nameCallback,
+                    'pathCallback' => $annotation->pathCallback,
+                );
+            }
+        }
     }
 
     /**
@@ -401,7 +393,7 @@ class FileSubscriber implements EventSubscriber
 
     /**
      * Change a property value and marked it as changed in the unit of work
-     * 
+     *
      * @param \Doctrine\Common\EventArgs $ea
      * @param array $fileConfig
      * @param object $fileEntity
