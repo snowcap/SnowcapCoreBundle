@@ -83,7 +83,7 @@ class FileSubscriber implements EventSubscriber
 
         // First, check all entities in identity map - if they have a file object they need to be processed, so
         // we will "manually" schedule them for updates. Without this code, entities for which only a file property
-        // is changed are not scheuled for update
+        // is changed are not scheduled for update
         foreach ($unitOfWork->getIdentityMap() as $entities) {
             foreach ($entities as $fileEntity) {
                 $this->loadFileConfig($fileEntity, $entityManager); // Load file subscriber config for the entity
@@ -275,16 +275,16 @@ class FileSubscriber implements EventSubscriber
     {
         // Update the mapped property on the entity with the generated file name
         $newMappedValue = $this->generateFileName($fileEntity, $fileConfig);
-        $this->changePropertyVaue($ea, $fileConfig, $fileEntity, 'mappedBy', $newMappedValue);
+        $this->changePropertyValue($ea, $fileConfig, $fileEntity, 'mappedBy', $newMappedValue);
 
         // The "filename" property allows us to store the original file name on another entity property
         if ($fileConfig['filename'] !== null) {
             $file = $fileConfig['file']->getValue($fileEntity);
             $newFilename = $file->getClientOriginalName();
-            $this->changePropertyVaue($ea, $fileConfig, $fileEntity, 'filename', $newFilename);
+            $this->changePropertyValue($ea, $fileConfig, $fileEntity, 'filename', $newFilename);
         }
 
-        $this->uploadEntities[] = $fileEntity;
+        $this->uploadEntities[spl_object_hash($fileEntity)] = $fileEntity;
     }
 
     /**
@@ -326,15 +326,15 @@ class FileSubscriber implements EventSubscriber
     private function preRemoveUpload(OnFlushEventArgs $ea, $fileEntity, array $fileConfig)
     {
         // Clear the "mappedBy" property
-        $oldMappedByValue = $this->changePropertyVaue($ea, $fileConfig, $fileEntity, 'mappedBy', null);
+        $oldMappedByValue = $this->changePropertyValue($ea, $fileConfig, $fileEntity, 'mappedBy', null);
 
         // The "filename" property needs to be cleared as well
         if ($fileConfig['filename'] !== null) {
-            $this->changePropertyVaue($ea, $fileConfig, $fileEntity, 'filename', null);
+            $this->changePropertyValue($ea, $fileConfig, $fileEntity, 'filename', null);
         }
 
         $this->unlinkQueue[spl_object_hash($fileEntity)] = $this->uploadDir . '/' . $oldMappedByValue;
-        $this->condemnedEntities[] = $fileEntity;
+        $this->condemnedEntities[spl_object_hash($fileEntity)] = $fileEntity;
     }
 
     /**
@@ -401,7 +401,7 @@ class FileSubscriber implements EventSubscriber
      * @param string $newValue
      * @return string
      */
-    private function changePropertyVaue($ea, $fileConfig, $fileEntity, $configKey, $newValue)
+    private function changePropertyValue($ea, $fileConfig, $fileEntity, $configKey, $newValue)
     {
         $oldValue = $fileConfig['meta']->getFieldValue($fileEntity, $fileConfig[$configKey]);
         $fileConfig['meta']->setFieldValue($fileEntity, $fileConfig[$configKey], $newValue);
