@@ -25,13 +25,13 @@ class SiteExtension extends \Twig_Extension
     public function getFunctions()
     {
         return array(
-            'prepend_page_title' => new \Twig_Function_Method($this, 'prependPageTitle'),
-            'append_page_title' => new \Twig_Function_Method($this, 'appendPageTitle'),
-            'page_title' => new \Twig_Function_Method($this, 'getPageTitle'),
-            'meta_description' => new \Twig_Function_Method($this, 'getMetaDescription'),
-            'set_meta_description' => new \Twig_Function_Method($this, 'setMetaDescription'),
-            'meta_keywords' => new \Twig_Function_Method($this, 'getMetaKeywords'),
-            'add_meta_keywords' => new \Twig_Function_Method($this, 'addMetaKeywords'),
+            'prepend_page_title' => new \Twig_SimpleFunction($this, 'prependPageTitle'),
+            'append_page_title' => new \Twig_SimpleFunction($this, 'appendPageTitle'),
+            'page_title' => new \Twig_SimpleFunction($this, 'getPageTitle'),
+            'meta_description' => new \Twig_SimpleFunction($this, 'getMetaDescription'),
+            'set_meta_description' => new \Twig_SimpleFunction($this, 'setMetaDescription'),
+            'meta_keywords' => new \Twig_SimpleFunction($this, 'getMetaKeywords'),
+            'add_meta_keywords' => new \Twig_SimpleFunction($this, 'addMetaKeywords'),
         );
     }
 

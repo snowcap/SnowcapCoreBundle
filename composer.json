@@ -23,17 +23,19 @@
             "homepage": "http://www.snowcap.be"
         }
     ],
-    "minimum-stability": "dev",
+    "minimum-stability": "stable",
     "require": {
         "php": ">=5.3.3",
         "symfony/framework-bundle": ">=2.7"
     },
     "require-dev": {
         "symfony/symfony": ">=2.7",
-        "fzaninotto/faker": "1.1.*@dev",
-        "doctrine/orm": ">=2.2.3",
-        "doctrine/doctrine-bundle": "1.2.*",
-        "doctrine/data-fixtures": "1.0.*@dev"
+        "fzaninotto/faker": "^1.5",
+        "doctrine/orm": "^2.5",
+        "doctrine/doctrine-bundle": "^1.5",
+        "doctrine/data-fixtures": "^1.1",
+        "phpunit/phpunit": "^4.8",
+        "symfony/phpunit-bridge": "^2.7"
 },
     "autoload": {
         "psr-0": { "Snowcap\\CoreBundle": "" }

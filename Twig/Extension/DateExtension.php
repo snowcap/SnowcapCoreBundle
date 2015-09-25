@@ -7,14 +7,14 @@ use Symfony\Component\Translation\TranslatorInterface;
 class DateExtension extends \Twig_Extension
 {
     /**
-     * @var Translator
+     * @var TranslatorInterface
      */
     private $translator;
 
     /**
      * Date extension constructor
      *
-     * @param Translator $translator
+     * @param TranslatorInterface $translator
      */
     public function __construct(TranslatorInterface $translator)
     {
@@ -29,7 +29,7 @@ class DateExtension extends \Twig_Extension
     public function getFilters()
     {
         return array(
-            'time_ago' => new \Twig_Filter_Method($this, 'timeAgo'),
+            'time_ago' => new \Twig_SimpleFilter($this, 'timeAgo'),
         );
     }
 
@@ -81,7 +81,7 @@ class DateExtension extends \Twig_Extension
     /**
      * Helper used to get a date interval between a date and now
      *
-     * @param string|DateTime $datetime
+     * @param string|\DateTime $datetime
      *
      * @return \DateInterval
      */

@@ -12,7 +12,7 @@ class PasswordStrengthValidatorTest extends \PHPUnit_Framework_TestCase
 
     protected function setUp()
     {
-        $this->context = $this->getMock('Symfony\Component\Validator\ExecutionContext', array(), array(), '', false);
+        $this->context = $this->getMock('Symfony\Component\Validator\Context\ExecutionContext', array(), array(), '', false);
         $this->validator = new PasswordStrengthValidator();
         $this->validator->initialize($this->context);
     }

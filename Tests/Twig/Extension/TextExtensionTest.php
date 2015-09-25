@@ -43,7 +43,7 @@ class TextExtensionTest extends \PHPUnit_Framework_TestCase
     public function testGetFilters()
     {
         $filters = $this->extension->getFilters();
-        $this->assertInstanceOf('\Twig_Filter_Method', $filters['safe_truncate']);
+        $this->assertInstanceOf('\Twig_SimpleFilter', $filters['safe_truncate']);
     }
 
     /**
@@ -100,7 +100,7 @@ class TextExtensionTest extends \PHPUnit_Framework_TestCase
     {
         $separator = '...';
 
-        $env = $this->getMock('\Twig_Environment');
+        $env = $this->getMock('\Twig_Environment', [], [], '', false);
         $env->expects($this->any())->method('getCharset')->will($this->returnValue('utf8'));
 
         // Simple text
