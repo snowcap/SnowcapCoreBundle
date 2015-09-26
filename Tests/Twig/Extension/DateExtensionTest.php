@@ -36,7 +36,10 @@ class DateExtensionTest extends \PHPUnit_Framework_TestCase
     public function testGetFilters()
     {
         $filters = $this->extension->getFilters();
-        $this->assertInstanceOf('\Twig_SimpleFilter', $filters['time_ago']);
+        $this->assertEquals(count($filters), 1);
+        $filter = $filters[0];
+        $this->assertInstanceOf('\Twig_SimpleFilter', $filter);
+        $this->assertEquals($filter->getName(), 'time_ago');
     }
 
     /**

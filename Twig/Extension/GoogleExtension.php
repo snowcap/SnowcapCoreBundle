@@ -66,9 +66,9 @@ class GoogleExtension extends \Twig_Extension
     public function getFunctions()
     {
         return array(
-            'analytics_tracking_code'     => new \Twig_SimpleFunction($this, 'getAnalyticsTrackingCode', array('is_safe' => array('html'))),
-            'analytics_tracking_commerce' => new \Twig_SimpleFunction($this, 'getAnalyticsCommerce', array('is_safe' => array('html'))),
-            'tags_manager_code' => new \Twig_SimpleFunction($this, 'getTagsManagerCode', array('is_safe' => array('html'))),
+            new \Twig_SimpleFunction('analytics_tracking_code', array($this, 'getAnalyticsTrackingCode'), array('is_safe' => array('html'))),
+            new \Twig_SimpleFunction('analytics_tracking_commerce', array($this, 'getAnalyticsCommerce'), array('is_safe' => array('html'))),
+            new \Twig_SimpleFunction('tags_manager_code', array($this, 'getTagsManagerCode'), array('is_safe' => array('html'))),
         );
     }
 

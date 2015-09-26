@@ -44,8 +44,8 @@ class TextExtension extends \Twig_Extension
     public function getFilters()
     {
         return array(
-            'camelize' => new \Twig_SimpleFilter($this, 'camelize', array('is_safe' => array('html'))),
-            'safe_truncate' => new \Twig_SimpleFilter($this, 'safeTruncate', array('needs_environment' => true, 'is_safe' => array('html'))),
+            new \Twig_SimpleFilter('camelize', array($this, 'camelize'), array('is_safe' => array('html'))),
+            new \Twig_SimpleFilter('safe_truncate', array($this, 'safeTruncate'), array('needs_environment' => true, 'is_safe' => array('html'))),
         );
     }
 
