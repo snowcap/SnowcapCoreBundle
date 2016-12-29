@@ -2,9 +2,13 @@
 
 namespace Snowcap\CoreBundle\Navigation;
 
-use Symfony\Component\DependencyInjection\ContainerAware;
+use Symfony\Component\DependencyInjection\ContainerAwareInterface;
+use Symfony\Component\DependencyInjection\ContainerAwareTrait;
 
-class NavigationRegistry extends ContainerAware {
+class NavigationRegistry implements ContainerAwareInterface
+{
+    use ContainerAwareTrait;
+
     /**
      * @var array
      */
